@@ -1,0 +1,3 @@
+sudo systemctl unmask gokart-dash.service
+sudo systemctl enable gokart-dash.service
+sudo systemctl start gokart-dash.service

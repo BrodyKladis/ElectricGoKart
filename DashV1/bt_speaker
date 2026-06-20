@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+import subprocess
+import time
+import signal
+import sys
+import re
+
+PHONE_MAC = "98:0D:6F:74:4A:D6"
+ALSA_DEVICE = "plughw:CARD=wm8960soundcard,DEV=0"
+STARTUP_SOUND = "/home/gokart/Desktop/DashV1/StartupSound.wav"
+CHECK_INTERVAL = 5.0
+
+btctl = None
+player = None
+
+
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def send_btctl(cmd):
+    global btctl
+    if btctl is None or btctl.poll() is not None:
+        raise RuntimeError("bluetoothctl is not running")
+    btctl.stdin.write(cmd + "\n")
+    btctl.stdin.flush()
+
+
+def get_connected_devices():
+    out = run(["bluetoothctl", "devices", "Connected"]).stdout
+    devices = []
+    for line in out.splitlines():
+        m = re.match(r"Device\s+([0-9A-F:]{17})\s+(.+)", line.strip(), re.I)
+        if m:
+            devices.append((m.group(1), m.group(2)))
+    return devices
+
+
+def is_connected(mac):
+    mac = mac.upper()
+    return any(dev_mac.upper() == mac for dev_mac, _ in get_connected_devices())
+
+
+def play_startup_sound():
+    try:
+        print(f"[INFO] Playing startup sound: {STARTUP_SOUND}", flush=True)
+        subprocess.run(
+            ["aplay", "-D", ALSA_DEVICE, STARTUP_SOUND],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False
+        )
+    except Exception as e:
+        print(f"[WARN] Startup sound failed: {e}", flush=True)
+
+
+def start_player():
+    global player
+    if player is None or player.poll() is not None:
+        print(f"[INFO] Starting bluealsa-aplay -> {ALSA_DEVICE}", flush=True)
+        player = subprocess.Popen(
+            ["bluealsa-aplay", "-D", ALSA_DEVICE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+
+def stop_player():
+    global player
+    if player and player.poll() is None:
+        print("[INFO] Stopping bluealsa-aplay", flush=True)
+        player.terminate()
+        try:
+            player.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            player.kill()
+    player = None
+
+
+def setup_bluetooth():
+    global btctl
+    btctl = subprocess.Popen(
+        ["bluetoothctl"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1
+    )
+
+    time.sleep(1)
+
+    send_btctl("power on")
+    send_btctl("agent NoInputNoOutput")
+    send_btctl("default-agent")
+    send_btctl("pairable on")
+    send_btctl("discoverable on")
+    send_btctl(f"trust {PHONE_MAC}")
+
+    print("[INFO] Bluetooth setup complete", flush=True)
+
+
+def try_connect():
+    print(f"[INFO] Trying to connect to {PHONE_MAC}", flush=True)
+    send_btctl(f"connect {PHONE_MAC}")
+
+
+def cleanup(*_):
+    stop_player()
+    global btctl
+    if btctl and btctl.poll() is None:
+        btctl.terminate()
+    sys.exit(0)
+
+
+def main():
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
+    setup_bluetooth()
+    play_startup_sound()
+
+    while True:
+        try:
+            if is_connected(PHONE_MAC):
+                start_player()
+            else:
+                stop_player()
+                send_btctl("pairable on")
+                send_btctl("discoverable on")
+                send_btctl(f"trust {PHONE_MAC}")
+                try_connect()
+        except Exception as e:
+            print(f"[WARN] {e}", flush=True)
+
+        time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
